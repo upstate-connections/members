@@ -32,6 +32,9 @@ create table if not exists public.events (
   speaker_business text,
   created_at       timestamptz not null default now()
 );
+-- Second speaker (added later; safe to re-run)
+alter table public.events add column if not exists speaker2_name     text;
+alter table public.events add column if not exists speaker2_business text;
 
 create table if not exists public.dues (
   id          uuid primary key default gen_random_uuid(),

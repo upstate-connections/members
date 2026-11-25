@@ -38,8 +38,6 @@ $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal" || e.
 const fmtDate = (iso) => new Date(iso).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 const fmtTime = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 const fmtRange = (e) => `${fmtDate(e.starts_at)} · ${fmtTime(e.starts_at)}${e.ends_at ? " – " + fmtTime(e.ends_at) : ""}`;
-const toLocalInput = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null);
 const money = (n) => (n == null || n === "" ? "" : "$" + Number(n).toFixed(2));
 const endOf = (e) => e.ends_at || new Date(new Date(e.starts_at).getTime() + 3600e3).toISOString();
 
@@ -54,8 +52,14 @@ function formData(form) {
 const icsDate = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 const icsText = (s) => String(s || "").replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
 const fold = (line) => { const out = []; while (line.length > 74) { out.push(line.slice(0, 74)); line = " " + line.slice(74); } out.push(line); return out.join("\r\n"); };
+// An event can have up to two speakers: speaker_name/speaker_business and speaker2_name/speaker2_business.
+const speakersOf = (e) => [[e.speaker_name, e.speaker_business], [e.speaker2_name, e.speaker2_business]]
+  .filter(([n]) => n).map(([name, business]) => ({ name, business }));
+const speakerLabel = (e) => (speakersOf(e).length > 1 ? "Speakers" : "Speaker");
 function eventDetails(e) {
-  return [e.speaker_name && `Speaker: ${e.speaker_name}${e.speaker_business ? " (" + e.speaker_business + ")" : ""}`, e.description].filter(Boolean).join("\n\n");
+  const sp = speakersOf(e);
+  const who = sp.length ? `${speakerLabel(e)}: ` + sp.map((s) => s.name + (s.business ? " (" + s.business + ")" : "")).join("; ") : "";
+  return [who, e.description].filter(Boolean).join("\n\n");
 }
 function buildICS(events) {
   const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Connection Group//Members Site//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"];
@@ -209,7 +213,7 @@ function eventItem(e) {
   return `<div class="event-item">
     <div class="date-chip"><div class="m">${d.toLocaleDateString(undefined, { month: "short" })}</div><div class="d">${d.getDate()}</div></div>
     <div><b>${esc(e.title)}</b><div class="small muted">${fmtRange(e)}${e.location ? " · " + esc(e.location) : ""}</div>
-    ${e.speaker_name ? `<div class="small">Speaker: ${esc(e.speaker_name)}${e.speaker_business ? " — " + esc(e.speaker_business) : ""}</div>` : ""}
+    ${speakersOf(e).length ? `<div class="small">${speakerLabel(e)}: ${speakersOf(e).map((s) => esc(s.name) + (s.business ? " — " + esc(s.business) : "")).join(" &amp; ")}</div>` : ""}
     <div class="row small" style="margin-top:4px"><a href="${esc(googleLink(e))}" target="_blank" rel="noopener">Add to Google</a><a href="#" data-ics="${e.id}">Download .ics</a></div></div></div>`;
 }
 function bindIcs(root, events) {
@@ -486,34 +490,80 @@ async function adminDues(root) {
   });
 }
 
-function eventForm(e = {}) {
+// Date/time helpers for the event form (all in the viewer's local time).
+const dateOf = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const timeOf = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const combine = (date, time) => (date && time ? new Date(`${date}T${time}`).toISOString() : null);
+const addDays = (date, n) => { const [y, m, d] = date.split("-").map(Number); return dateOf(new Date(y, m - 1, d + n).toISOString()); };
+
+// New events start from the most recent event: same title, times and location, one week later.
+function eventDefaults(events) {
+  const last = events[events.length - 1];
+  if (!last) return { title: "Weekly Meeting" };
+  return {
+    title: last.title, location: last.location,
+    date: addDays(dateOf(last.starts_at), 7),
+    start: timeOf(last.starts_at), end: timeOf(last.ends_at),
+  };
+}
+
+function eventForm(e = {}, defaults = {}, members = []) {
+  const v = e.id
+    ? { title: e.title, location: e.location, date: dateOf(e.starts_at), start: timeOf(e.starts_at), end: timeOf(e.ends_at) }
+    : defaults;
+  const speakerFields = (n, label) => {
+    const name = n === 1 ? "speaker_name" : "speaker2_name", biz = n === 1 ? "speaker_business" : "speaker2_business";
+    return `<div class="field"><label>${label}</label><input name="${name}" list="memberNames" autocomplete="off" value="${esc(e[name])}" placeholder="Start typing a member's name"></div>
+      <div class="field"><label>Business <span class="small muted">(fills in automatically)</span></label><input name="${biz}" value="${esc(e[biz])}"></div>`;
+  };
   return `<h2>${e.id ? "Edit event" : "New event"}</h2><form id="ef">
-    <div class="field"><label>Title *</label><input name="title" value="${esc(e.title)}" required placeholder="Weekly meeting"></div>
-    <div class="fields-2">
-      <div class="field"><label>Starts *</label><input name="starts_at" type="datetime-local" value="${esc(toLocalInput(e.starts_at))}" required></div>
-      <div class="field"><label>Ends</label><input name="ends_at" type="datetime-local" value="${esc(toLocalInput(e.ends_at))}"></div>
-      <div class="field"><label>Speaker</label><input name="speaker_name" value="${esc(e.speaker_name)}"></div>
-      <div class="field"><label>Speaker's business</label><input name="speaker_business" value="${esc(e.speaker_business)}"></div>
+    <datalist id="memberNames">${members.map((m) => `<option value="${esc(m.full_name)}"></option>`).join("")}</datalist>
+    <div class="field"><label>Title *</label><input name="title" value="${esc(v.title)}" required placeholder="Weekly Meeting"></div>
+    <div class="fields-3">
+      <div class="field"><label>Date *</label><input name="date" type="date" value="${esc(v.date)}" required></div>
+      <div class="field"><label>Start time *</label><input name="start" type="time" value="${esc(v.start)}" required></div>
+      <div class="field"><label>End time</label><input name="end" type="time" value="${esc(v.end)}"></div>
     </div>
-    <div class="field"><label>Location</label><input name="location" value="${esc(e.location)}"></div>
-    <div class="field"><label>Details</label><textarea name="description">${esc(e.description)}</textarea></div>
+    <div class="fields-2">${speakerFields(1, "Speaker")}${speakerFields(2, "Second speaker (optional)")}</div>
+    <div class="field"><label>Location</label><input name="location" value="${esc(v.location)}"></div>
+    <div class="field"><label>Details (optional)</label><textarea name="description">${esc(e.description)}</textarea></div>
     ${e.id ? "" : `<div class="field row"><label style="margin:0">Repeat weekly for</label><input name="repeat" type="number" min="1" max="52" value="1" style="width:80px"><span class="small muted">week(s)</span></div>`}
     <div class="row" style="justify-content:flex-end"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save</button></div></form>`;
 }
+// When a speaker name matches a member, fill in their business.
+function bindSpeakerLookup(form, members) {
+  const byName = new Map(members.map((m) => [m.full_name.trim().toLowerCase(), m]));
+  [["speaker_name", "speaker_business"], ["speaker2_name", "speaker2_business"]].forEach(([n, b]) => {
+    const nameEl = form.elements[n], bizEl = form.elements[b];
+    nameEl.addEventListener("input", () => {
+      const m = byName.get(nameEl.value.trim().toLowerCase());
+      if (m) bizEl.value = m.business || "";
+      else if (!nameEl.value.trim()) bizEl.value = "";
+    });
+  });
+}
 async function adminEvents(root) {
-  const events = await getEvents();
+  const [events, { data: members }] = await Promise.all([
+    getEvents(),
+    sb.from("members").select("full_name,business").eq("active", true).order("full_name"),
+  ]);
   const now = Date.now();
   const up = events.filter((e) => new Date(endOf(e)).getTime() >= now), past = events.filter((e) => new Date(endOf(e)).getTime() < now).reverse();
-  const rows = (list) => list.map((e) => `<tr><td>${esc(fmtRange(e))}</td><td>${esc(e.title)}</td><td class="small">${esc(e.speaker_name)}</td>
+  const rows = (list) => list.map((e) => `<tr><td>${esc(fmtRange(e))}</td><td>${esc(e.title)}</td><td class="small">${esc(speakersOf(e).map((s) => s.name).join(" & "))}</td>
     <td class="row" style="flex-wrap:nowrap"><button class="btn ghost small" data-edit="${e.id}">Edit</button><button class="btn danger small" data-del="${e.id}">Delete</button></td></tr>`).join("");
   root.innerHTML = `<div class="row spread" style="margin-bottom:12px"><h2 style="margin:0">Upcoming</h2><button class="btn" id="add">+ New event</button></div>
     <div class="table-wrap"><table><tr><th>When</th><th>Title</th><th>Speaker</th><th></th></tr>${rows(up) || `<tr><td colspan="4" class="muted">None</td></tr>`}</table></div>
     ${past.length ? `<details style="margin-top:16px"><summary>Past events (${past.length})</summary><div class="table-wrap" style="margin-top:8px"><table>${rows(past)}</table></div></details>` : ""}`;
   const edit = (e) => {
-    const box = openModal(eventForm(e));
+    const box = openModal(eventForm(e, eventDefaults(events), members || []));
+    bindSpeakerLookup($("#ef", box), members || []);
     $("#ef", box).onsubmit = async (ev) => {
       ev.preventDefault(); const f = formData(ev.target); const repeat = Math.max(1, Math.min(52, Number(f.repeat || 1))); delete f.repeat;
-      f.starts_at = fromLocalInput(f.starts_at); f.ends_at = fromLocalInput(f.ends_at);
+      f.starts_at = combine(f.date, f.start); f.ends_at = combine(f.date, f.end);
+      delete f.date; delete f.start; delete f.end;
+      if (!f.speaker_name && f.speaker2_name) { // keep the first speaker slot filled
+        [f.speaker_name, f.speaker_business, f.speaker2_name, f.speaker2_business] = [f.speaker2_name, f.speaker2_business, null, null];
+      }
       if (f.ends_at && f.ends_at <= f.starts_at) return toast("End time must be after start time", true);
       let error;
       if (e.id) ({ error } = await sb.from("events").update(f).eq("id", e.id));
